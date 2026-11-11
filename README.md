@@ -211,6 +211,62 @@ two pre-aggregated sources at different grains.
 
 ---
 
+## Code
+
+The patterns above are implemented in `dataguard/`, a small Python package
+(pandas and the standard library only). All data in `examples/` and `tests/`
+is synthetic.
+
+| Module | Failure mode it prevents | Failure # |
+|---|---|---|
+| `dataguard/reconcile.py` | Output row count or totals drift from source with no error. Count and sum reconciliation with tolerance, structured result, `raise_if_failed()`. | 1, 3 |
+| `dataguard/joins.py` | A join on a non-unique key multiplies rows. `check_join_cardinality` predicts the exact output row count before you run the join and flags fanout. `composite_key` is a deterministic, null-safe multi-column hash. `dedupe_latest` is the `ROW_NUMBER() ... rn = 1` guard. | 1, 5 |
+| `dataguard/completeness.py` | A connector succeeds but drops records. Expected vs received counts, percent missing, threshold alert, and the list of missing ids. | 3 |
+| `dataguard/chunked_join.py` | Join runs out of memory at production volume. Prunes columns, pre-aggregates, pre-filters unmatched keys, then joins one hash partition at a time. Tested for identical results to a naive join. | 2 |
+| `dataguard/governance.py` | Orphaned, stale, duplicate and oversized datasets accumulate and cost credits. Audit over a metadata DataFrame plus a savings estimate driven by a configurable cost per million rows. | n/a |
+| `governance_queries.sql` | Same governance audit as generic SELECT queries (no CTEs). Adapt table names and date syntax. | n/a |
+
+Differences from the README snippets: `reconcile_counts` returns a result object
+instead of a bare bool, and `composite_key` hashes columns in the order you pass
+them and length-prefixes each value so `("ab", "c")` and `("a", "bc")` do not collide.
+
+### Run it
+
+```bash
+pip install -r requirements.txt
+
+# test suite
+python -m pytest -q
+
+# demo: a silent 4x row multiplication, caught before and after the join
+python examples/demo.py
+```
+
+Minimal usage:
+
+```python
+from dataguard import check_join_cardinality, reconcile_frames
+
+report = check_join_cardinality(orders, products, "product_id", how="left")
+print(report.summary())   # ... predicted_rows=4000 fanout=4.00x [ROW MULTIPLICATION]
+
+joined = orders.merge(products, on="product_id", how="left")
+reconcile_frames(orders, joined, sum_columns=["revenue"]).raise_if_failed()
+```
+
+```python
+from dataguard import GovernanceConfig, audit_datasets, estimate_savings
+
+cfg = GovernanceConfig(stale_days=180, oversized_rows=50_000_000, cost_per_million_rows=1.0)
+audited = audit_datasets(metadata_df, cfg)   # columns: name, owner, rows, last_updated, downstream_count, duplicate_of
+print(estimate_savings(audited, cfg))
+```
+
+The default cost per million rows is a placeholder. Set it from your own contract
+or usage report before quoting a savings number.
+
+---
+
 ## Technologies
 
 `SQL` · `Python` · `pandas` · `Magic ETL` · `Snowflake` · `Salesforce` ·
